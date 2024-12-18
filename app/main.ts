@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import * as fs from "fs";
 import zlib from "zlib";
 
@@ -7,6 +8,7 @@ const command = args[0];
 enum Commands {
   Init = "init",
   CatFile = "cat-file",
+  HashObject = "hash-object",
 }
 
 switch (command) {
@@ -31,6 +33,26 @@ switch (command) {
     const decompressed = zlib.inflateSync(buffer as any);
 
     process.stdout.write(decompressed.toString().split("\0")[1]);
+    break;
+  case Commands.HashObject:
+    const file = args[2];
+    const fileContent = fs.readFileSync(file);
+    const metaData = Buffer.from(`blob ${fileContent.length}\0`);
+
+    const content = Buffer.concat([metaData, fileContent]);
+
+    const hash = crypto.createHash("sha1").update(content).digest("hex");
+
+    process.stdout.write(hash);
+    const compressed = zlib.deflateSync(content);
+    if (!fs.existsSync(`.git/objects/${hash.slice(0, 2)}`)) {
+      fs.mkdirSync(`.git/objects/${hash.slice(0, 2)}`);
+    }
+
+    fs.writeFileSync(
+      `.git/objects/${hash.slice(0, 2)}/${hash.slice(2)}`,
+      compressed
+    );
     break;
   default:
     throw new Error(`Unknown command ${command}`);
