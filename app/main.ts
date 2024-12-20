@@ -1,4 +1,4 @@
-import crypto from "crypto";
+import crypto, { hash } from "crypto";
 import * as fs from "fs";
 import zlib from "zlib";
 
@@ -13,6 +13,14 @@ enum Commands {
   WriteTree = "write-tree",
 }
 
+const hexToBytes = (hex: string): string => {
+  const bytes = new Uint8Array(20);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.slice(i, i + 2), 16);
+  }
+  return String.fromCharCode(...bytes);
+};
+
 const readFileSync = (objectHash: string): string => {
   const objectPath = `.git/objects/${objectHash.slice(0, 2)}/${objectHash.slice(
     2
@@ -22,10 +30,18 @@ const readFileSync = (objectHash: string): string => {
   return decompressed.toString();
 };
 
-const writeFileSync = (content: any): void => {
-  const hash = crypto.createHash("sha1").update(content).digest("hex");
+const hashBuffer = (
+  buffer: Buffer,
+  type: "blob" | "tree" = "blob"
+): { hash: string; content: any } => {
+  const metaData: any = Buffer.from(`${type} ${buffer.length}\0`);
 
-  process.stdout.write(hash);
+  const content: any = Buffer.concat([metaData, buffer]);
+  const hash = crypto.createHash("sha1").update(content).digest("hex");
+  return { hash, content };
+};
+
+const writeFileSync = (hash: string, content: any): void => {
   const compressed: any = zlib.deflateSync(content);
   if (!fs.existsSync(`.git/objects/${hash.slice(0, 2)}`)) {
     fs.mkdirSync(`.git/objects/${hash.slice(0, 2)}`);
@@ -35,6 +51,58 @@ const writeFileSync = (content: any): void => {
     `.git/objects/${hash.slice(0, 2)}/${hash.slice(2)}`,
     compressed
   );
+};
+
+const recursiveReadDir = (dir: string): string => {
+  const files = fs.readdirSync(dir, { withFileTypes: true });
+  const result: { mode: number; name: string; hash: string }[] = [];
+  for (const file of files) {
+    if (file.name === ".git") {
+      continue;
+    }
+    if (file.isDirectory()) {
+      const treeHash = recursiveReadDir(`${dir}/${file.name}`);
+      result.push({
+        mode: 40000,
+        name: file.name,
+        hash: treeHash,
+      });
+    } else {
+      // 100644 (regular file)
+      // 100755 (executable file)
+      // 120000 (symbolic link)
+      if (file.isSymbolicLink()) {
+        continue;
+      }
+
+      let executable: boolean;
+      try {
+        fs.accessSync(`${dir}/${file}`, fs.constants.X_OK);
+        executable = true;
+      } catch {
+        executable = false;
+      }
+      result.push({
+        mode: executable ? 100755 : 100644,
+        name: file.name,
+        hash: hashBuffer(fs.readFileSync(`${dir}/${file.name}`)).hash,
+      });
+    }
+  }
+
+  result.sort((a, b) => a.name.localeCompare(b.name));
+  const content = Buffer.concat(
+    result.map(({ mode, name, hash }) =>
+      Buffer.concat([
+        Buffer.from(`${mode} ${name}\0`) as any,
+        Buffer.from(hash, "hex") as any,
+      ])
+    ) as any[]
+  );
+
+  const { hash: treeHash, content: treeContent } = hashBuffer(content, "tree");
+  writeFileSync(treeHash, treeContent);
+  return treeHash;
 };
 
 switch (command) {
@@ -59,11 +127,9 @@ switch (command) {
   case Commands.HashObject: {
     const file = args[2];
     const fileContent = fs.readFileSync(file);
-    const metaData: any = Buffer.from(`blob ${fileContent.length}\0`);
-
-    const content: any = Buffer.concat([metaData, fileContent]);
-
-    writeFileSync(content);
+    const { hash, content } = hashBuffer(fileContent);
+    process.stdout.write(hash);
+    writeFileSync(hash, content);
     break;
   }
   case Commands.LsTree: {
@@ -79,17 +145,8 @@ switch (command) {
     break;
   }
   case Commands.WriteTree: {
-    const paths = fs.readdirSync(".");
-    console.log(paths);
-    for (const path of paths) {
-      if (path === ".git") {
-        continue;
-      }
-      if (fs.lstatSync(path).isDirectory()) {
-        // 다시
-      }
-    }
-
+    const hash = recursiveReadDir(".");
+    process.stdout.write(hash);
     break;
   }
   default:
