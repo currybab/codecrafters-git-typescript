@@ -9,7 +9,17 @@ enum Commands {
   Init = "init",
   CatFile = "cat-file",
   HashObject = "hash-object",
+  LsTree = "ls-tree",
 }
+
+const readFileSync = (objectHash: string): string => {
+  const objectPath = `.git/objects/${objectHash.slice(0, 2)}/${objectHash.slice(
+    2
+  )}`;
+  const buffer = fs.readFileSync(objectPath);
+  const decompressed = zlib.inflateSync(buffer as any);
+  return decompressed.toString();
+};
 
 switch (command) {
   case Commands.Init:
@@ -23,28 +33,24 @@ switch (command) {
     fs.writeFileSync(".git/HEAD", "ref: refs/heads/main\n");
     console.log("Initialized git directory");
     break;
-  case Commands.CatFile:
+  case Commands.CatFile: {
     const objectHash = args[2];
-    const objectPath = `.git/objects/${objectHash.slice(
-      0,
-      2
-    )}/${objectHash.slice(2)}`;
-    const buffer = fs.readFileSync(objectPath);
-    const decompressed = zlib.inflateSync(buffer as any);
+    const fileContent = readFileSync(objectHash);
 
-    process.stdout.write(decompressed.toString().split("\0")[1]);
+    process.stdout.write(fileContent.split("\0")[1]);
     break;
-  case Commands.HashObject:
+  }
+  case Commands.HashObject: {
     const file = args[2];
     const fileContent = fs.readFileSync(file);
-    const metaData = Buffer.from(`blob ${fileContent.length}\0`);
+    const metaData: any = Buffer.from(`blob ${fileContent.length}\0`);
 
-    const content = Buffer.concat([metaData, fileContent]);
+    const content: any = Buffer.concat([metaData, fileContent]);
 
     const hash = crypto.createHash("sha1").update(content).digest("hex");
 
     process.stdout.write(hash);
-    const compressed = zlib.deflateSync(content);
+    const compressed: any = zlib.deflateSync(content);
     if (!fs.existsSync(`.git/objects/${hash.slice(0, 2)}`)) {
       fs.mkdirSync(`.git/objects/${hash.slice(0, 2)}`);
     }
@@ -54,6 +60,19 @@ switch (command) {
       compressed
     );
     break;
+  }
+  case Commands.LsTree: {
+    const treeHash = args[2];
+    const treeContent = readFileSync(treeHash);
+    const fileNames = treeContent
+      .split("\0")
+      .slice(1, -1)
+      .map((str) => str.split(" ")[1]);
+    for (const fileName of fileNames) {
+      process.stdout.write(`${fileName}\n`);
+    }
+    break;
+  }
   default:
     throw new Error(`Unknown command ${command}`);
 }
