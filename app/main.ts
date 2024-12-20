@@ -10,6 +10,7 @@ enum Commands {
   CatFile = "cat-file",
   HashObject = "hash-object",
   LsTree = "ls-tree",
+  WriteTree = "write-tree",
 }
 
 const readFileSync = (objectHash: string): string => {
@@ -19,6 +20,21 @@ const readFileSync = (objectHash: string): string => {
   const buffer = fs.readFileSync(objectPath);
   const decompressed = zlib.inflateSync(buffer as any);
   return decompressed.toString();
+};
+
+const writeFileSync = (content: any): void => {
+  const hash = crypto.createHash("sha1").update(content).digest("hex");
+
+  process.stdout.write(hash);
+  const compressed: any = zlib.deflateSync(content);
+  if (!fs.existsSync(`.git/objects/${hash.slice(0, 2)}`)) {
+    fs.mkdirSync(`.git/objects/${hash.slice(0, 2)}`);
+  }
+
+  fs.writeFileSync(
+    `.git/objects/${hash.slice(0, 2)}/${hash.slice(2)}`,
+    compressed
+  );
 };
 
 switch (command) {
@@ -47,18 +63,7 @@ switch (command) {
 
     const content: any = Buffer.concat([metaData, fileContent]);
 
-    const hash = crypto.createHash("sha1").update(content).digest("hex");
-
-    process.stdout.write(hash);
-    const compressed: any = zlib.deflateSync(content);
-    if (!fs.existsSync(`.git/objects/${hash.slice(0, 2)}`)) {
-      fs.mkdirSync(`.git/objects/${hash.slice(0, 2)}`);
-    }
-
-    fs.writeFileSync(
-      `.git/objects/${hash.slice(0, 2)}/${hash.slice(2)}`,
-      compressed
-    );
+    writeFileSync(content);
     break;
   }
   case Commands.LsTree: {
@@ -71,6 +76,20 @@ switch (command) {
     for (const fileName of fileNames) {
       process.stdout.write(`${fileName}\n`);
     }
+    break;
+  }
+  case Commands.WriteTree: {
+    const paths = fs.readdirSync(".");
+    console.log(paths);
+    for (const path of paths) {
+      if (path === ".git") {
+        continue;
+      }
+      if (fs.lstatSync(path).isDirectory()) {
+        // 다시
+      }
+    }
+
     break;
   }
   default:
