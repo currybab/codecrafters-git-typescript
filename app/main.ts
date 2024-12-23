@@ -11,6 +11,7 @@ enum Commands {
   HashObject = "hash-object",
   LsTree = "ls-tree",
   WriteTree = "write-tree",
+  CommitTree = "commit-tree",
 }
 
 const hexToBytes = (hex: string): string => {
@@ -32,7 +33,7 @@ const readFileSync = (objectHash: string): string => {
 
 const hashBuffer = (
   buffer: Buffer,
-  type: "blob" | "tree" = "blob"
+  type: "blob" | "tree" | "commit" = "blob"
 ): { hash: string; content: any } => {
   const metaData: any = Buffer.from(`${type} ${buffer.length}\0`);
 
@@ -146,6 +147,28 @@ switch (command) {
   }
   case Commands.WriteTree: {
     const hash = recursiveReadDir(".");
+    process.stdout.write(hash);
+    break;
+  }
+  case Commands.CommitTree: {
+    const treeHash = args[1];
+    const parentHash = args[3];
+    const message = args[5];
+
+    const currentTime = Math.floor(Date.now() / 1000);
+    const commitContent = Buffer.concat([
+      Buffer.from(`tree ${treeHash}\n`),
+      parentHash ? Buffer.from(`parent ${parentHash}\n`) : Buffer.alloc(0),
+      Buffer.from(
+        `author Jun Park <pj2417@gmail.com> ${currentTime} +0900\n`
+      ) as any,
+      Buffer.from(
+        `committer Jun Park <pj2417@gmail.com> ${currentTime} +0900\n\n`
+      ) as any,
+      Buffer.from(`${message}\n`) as any,
+    ]) as any;
+    const { hash, content } = hashBuffer(commitContent, "commit");
+    writeFileSync(hash, content);
     process.stdout.write(hash);
     break;
   }
