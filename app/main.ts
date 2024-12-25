@@ -12,6 +12,7 @@ enum Commands {
   LsTree = "ls-tree",
   WriteTree = "write-tree",
   CommitTree = "commit-tree",
+  Clone = "clone",
 }
 
 const hexToBytes = (hex: string): string => {
@@ -170,6 +171,22 @@ switch (command) {
     const { hash, content } = hashBuffer(commitContent, "commit");
     writeFileSync(hash, content);
     process.stdout.write(hash);
+    break;
+  }
+  case Commands.Clone: {
+    const url = args[1];
+    const directory = args[2];
+
+    const response = await fetch(url + "/info/refs?service=git-upload-pack");
+    const body = await response.text();
+    console.log(body);
+    const lines = body.split("0000").slice(1).join("0000").split("\n");
+    console.log(lines);
+    for (const line of lines) {
+      const [content, ...capList] = line.split("\u0000");
+      console.log(content, capList);
+    }
+
     break;
   }
   default:
