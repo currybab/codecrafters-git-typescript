@@ -23,13 +23,17 @@ const hexToBytes = (hex: string): string => {
   return String.fromCharCode(...bytes);
 };
 
-const readFileSync = (objectHash: string): string => {
-  const objectPath = `.git/objects/${objectHash.slice(0, 2)}/${objectHash.slice(
-    2
-  )}`;
+const readFileSync = (
+  objectHash: string,
+  toString = true,
+  directory?: string
+): string | Buffer => {
+  const objectPath = `${
+    directory ? directory + "/" : ""
+  }.git/objects/${objectHash.slice(0, 2)}/${objectHash.slice(2)}`;
   const buffer = fs.readFileSync(objectPath);
   const decompressed = zlib.inflateSync(buffer as any);
-  return decompressed.toString();
+  return toString ? decompressed.toString() : decompressed;
 };
 
 const hashBuffer = (
@@ -43,14 +47,29 @@ const hashBuffer = (
   return { hash, content };
 };
 
-const writeFileSync = (hash: string, content: any): void => {
-  const compressed: any = zlib.deflateSync(content);
-  if (!fs.existsSync(`.git/objects/${hash.slice(0, 2)}`)) {
-    fs.mkdirSync(`.git/objects/${hash.slice(0, 2)}`);
+const writeFileSyncToPath = (path: string, content: any): void => {
+  const paths = path.split("/");
+  let dir = "";
+  for (let i = 0; i < paths.length - 1; i++) {
+    dir += `${paths[i]}/`;
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir);
+    }
   }
+  fs.writeFileSync(path, content);
+};
 
-  fs.writeFileSync(
-    `.git/objects/${hash.slice(0, 2)}/${hash.slice(2)}`,
+const writeFileSync = (
+  hash: string,
+  content: any,
+  directory?: string
+): void => {
+  const compressed: any = zlib.deflateSync(content);
+  writeFileSyncToPath(
+    `${directory ? directory + "/" : ""}.git/objects/${hash.slice(
+      0,
+      2
+    )}/${hash.slice(2)}`,
     compressed
   );
 };
@@ -121,7 +140,7 @@ switch (command) {
     break;
   case Commands.CatFile: {
     const objectHash = args[2];
-    const fileContent = readFileSync(objectHash);
+    const fileContent = readFileSync(objectHash) as string;
 
     process.stdout.write(fileContent.split("\0")[1]);
     break;
@@ -136,7 +155,7 @@ switch (command) {
   }
   case Commands.LsTree: {
     const treeHash = args[2];
-    const treeContent = readFileSync(treeHash);
+    const treeContent = readFileSync(treeHash) as string;
     const fileNames = treeContent
       .split("\0")
       .slice(1, -1)
@@ -177,14 +196,295 @@ switch (command) {
     const url = args[1];
     const directory = args[2];
 
-    const response = await fetch(url + "/info/refs?service=git-upload-pack");
-    const body = await response.text();
-    console.log(body);
+    const infoRefResponse = await fetch(
+      url + "/info/refs?service=git-upload-pack"
+    );
+    const body = await infoRefResponse.text();
     const lines = body.split("0000").slice(1).join("0000").split("\n");
-    console.log(lines);
+    const hashSet = new Set<string>();
     for (const line of lines) {
-      const [content, ...capList] = line.split("\u0000");
-      console.log(content, capList);
+      const [content, capListStr] = line.split("\u0000");
+      const size = parseInt(content.slice(0, 4), 16);
+      if (size === 0) {
+        break;
+      }
+      const hash = content.slice(4, 44);
+      const ref = content.slice(45);
+      const capList = (capListStr ?? "").split(" ");
+      hashSet.add(hash);
+      if (ref === "HEAD") {
+        // HEAD save...
+        const symref = capList.find((c) => c.startsWith("symref="));
+        console.log(symref);
+        if (symref) {
+          writeFileSyncToPath(
+            `${directory}/.git/HEAD`,
+            Buffer.from(`ref: ${symref.slice(12)}\n`)
+          );
+        } else {
+          writeFileSyncToPath(
+            `${directory}/.git/HEAD`,
+            Buffer.from(`${hash}\n`)
+          );
+        }
+        continue;
+      }
+      writeFileSyncToPath(`${directory}/.git/${ref}`, Buffer.from(`${hash}\n`));
+    }
+    const wantHashes = hashSet.values().toArray();
+    const uploadPackResponse = await fetch(url + "/git-upload-pack", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-git-upload-pack-request",
+      },
+      body: Buffer.concat([
+        ...wantHashes.map(
+          (wantHash) => Buffer.from(`0032want ${wantHash}\n`) as any
+        ),
+        Buffer.from("0000"),
+        Buffer.from("0009done\n"),
+      ]),
+    });
+    const uploadPackReader = uploadPackResponse.body?.getReader();
+    if (!uploadPackReader) {
+      throw new Error("No upload pack reader");
+    }
+    const uploadPackReaderLines = [];
+    while (true) {
+      // console.log("hihi2");
+      const { done, value: line } = await uploadPackReader.read();
+      // console.log(done, Buffer.from(line ?? "").toString());
+      if (done) {
+        break;
+      }
+      uploadPackReaderLines.push(line);
+    }
+    let packCount = 0;
+    let count = 0;
+    let idx = 0;
+    const byteArray = Buffer.concat(uploadPackReaderLines);
+    idx = byteArray.slice(0, 8).toString("utf-8") === "0008NAK\n" ? 8 : 0;
+    if (byteArray.slice(idx, idx + 4).toString() === "PACK") {
+      packCount =
+        byteArray[idx + 8] * 256 * 256 * 256 +
+        byteArray[idx + 9] * 256 * 256 +
+        byteArray[idx + 10] * 256 +
+        byteArray[idx + 11];
+      idx += 12;
+    }
+
+    console.log("packCount", packCount);
+
+    while (count < packCount) {
+      //idx < byteArray.length
+      count++;
+
+      // MSB(1 bit) + Type(3 bits) + Size(4 bits)
+      const type = (byteArray[idx] >> 4) & 7; // 1 = blob, 2 = tree, 3 = commit, 4 = tag, 6 = ofs-delta, 7 = ref-delta
+
+      let MSB = (byteArray[idx] >> 7) & 1;
+      let size = byteArray[idx] & 15;
+      if (MSB === 1) {
+        let move = -3;
+        while (true) {
+          idx++;
+          move += 7;
+          size = size + ((byteArray[idx] & 127) << move);
+          MSB = (byteArray[idx] >> 7) & 1;
+          if (MSB === 0) {
+            break;
+          }
+        }
+      }
+      idx++;
+      // console.log(`type: ${type}, size: ${size}`);
+
+      let reference = "";
+      let offset = 0;
+      if (type === 7) {
+        // ref-delta
+        reference = byteArray.slice(idx, idx + 20).toString("hex");
+        idx += 20;
+      } else if (type === 6) {
+        // ofs-delta
+      }
+
+      const { buffer: decompressedData, engine } = zlib.inflateSync(
+        byteArray.slice(idx) as any,
+        {
+          info: true,
+        }
+      );
+      switch (type) {
+        case 1: {
+          const { hash, content } = hashBuffer(
+            decompressedData as any,
+            "commit"
+          );
+          writeFileSync(hash, content, directory);
+          console.log(hash);
+          break;
+        }
+        case 2: {
+          const { hash, content } = hashBuffer(decompressedData as any, "tree");
+          writeFileSync(hash, content, directory);
+          console.log(hash);
+          break;
+        }
+        case 3: {
+          const { hash, content } = hashBuffer(decompressedData as any, "blob");
+          writeFileSync(hash, content, directory);
+          console.log(hash);
+          break;
+        }
+        case 4: {
+          // OBJ_TAG not found
+          break;
+        }
+        case 6: {
+          // OBJ_OFS_DELTA not found
+          break;
+        }
+        case 7: {
+          console.log("ref:", reference);
+          let dIdx = 0;
+          let sourceLength = 0;
+          let lIdx = 0;
+          while (true) {
+            sourceLength =
+              sourceLength +
+              (decompressedData[dIdx] & 127) * Math.pow(128, lIdx);
+            if (((decompressedData[dIdx] >> 7) & 1) === 0) {
+              break;
+            }
+            dIdx++;
+            lIdx++;
+          }
+          dIdx++;
+
+          let targetLength = 0;
+          lIdx = 0;
+          while (true) {
+            targetLength =
+              targetLength +
+              (decompressedData[dIdx] & 127) * Math.pow(128, lIdx);
+            if (((decompressedData[dIdx] >> 7) & 1) === 0) {
+              break;
+            }
+            dIdx++;
+            lIdx++;
+          }
+          dIdx++;
+          console.log(
+            `sourceLength: ${sourceLength}, targetLength: ${targetLength}`
+          );
+
+          // read file
+          let readBuffer = readFileSync(reference, false, directory) as any;
+          let nullIdx = 0;
+          while (readBuffer.at(nullIdx) !== 0) {
+            nullIdx++;
+          }
+          console.log(readBuffer.slice(0, nullIdx).toString());
+          const objectType = readBuffer
+            .slice(0, nullIdx)
+            .toString()
+            .split(" ")[0];
+          readBuffer = readBuffer.slice(nullIdx + 1);
+
+          let buffer = Buffer.alloc(0);
+
+          while (dIdx < decompressedData.byteLength) {
+            const byte0 = decompressedData[dIdx];
+            const command = (byte0 >> 7) & 1; // 0: copy, 1: add
+            console.log("command", command);
+            dIdx++;
+            if (command === 1) {
+              let offset = 0;
+              let size = 0;
+              for (let i = 0; i < 7; i++) {
+                const readByte = (byte0 >> i) & 1;
+                if (readByte === 0) {
+                  continue;
+                }
+                if (i < 4) {
+                  offset = offset + decompressedData[dIdx] * Math.pow(256, i);
+                } else {
+                  size = size + decompressedData[dIdx] * Math.pow(256, i - 4);
+                }
+                dIdx++;
+              }
+              console.log(offset, size, readBuffer.length);
+              buffer = Buffer.concat([
+                buffer,
+                Buffer.copyBytesFrom(readBuffer, offset, size),
+              ] as any);
+            } else {
+              const size = byte0;
+              console.log(size);
+              const data = decompressedData.slice(dIdx, dIdx + size);
+              buffer = Buffer.concat([buffer, data] as any);
+
+              dIdx += size;
+            }
+          }
+          const { hash, content } = hashBuffer(buffer as any, objectType);
+          writeFileSync(hash, content, directory);
+          console.log(objectType, hash, buffer.byteLength);
+
+          break;
+        }
+      }
+
+      idx = idx + engine.bytesRead;
+      // console.log(count);
+    }
+
+    // check checksum
+    // console.log(byteArray.slice(idx).toString("hex"));
+
+    // # working directory checkout
+
+    let HEAD = fs
+      .readFileSync(`${directory}/.git/HEAD`, {
+        encoding: "utf-8",
+      })
+      .trim();
+    if (HEAD.startsWith("ref: ")) {
+      HEAD = fs
+        .readFileSync(`${directory}/.git/${HEAD.slice(5)}`, {
+          encoding: "utf-8",
+        })
+        .trim();
+    }
+    const commit = readFileSync(HEAD, true, directory) as string;
+    const queue = [
+      {
+        hash: commit.split("\0")[1].split("\n")[0].split(" ")[1],
+        path: `${directory}/`,
+      },
+    ];
+
+    while (queue.length > 0) {
+      const { hash, path } = queue.shift()!;
+      const objList = readFileSync(hash, false, directory) as Buffer;
+      let lIdx = objList.indexOf(0) + 1;
+      while (lIdx < objList.byteLength) {
+        const nullIdx = objList.indexOf(0, lIdx);
+        const [mode, name] = objList.slice(lIdx, nullIdx).toString().split(" ");
+        const hash = objList.slice(nullIdx + 1, nullIdx + 21).toString("hex");
+        lIdx = nullIdx + 21;
+        if (mode === "40000") {
+          // tree
+          queue.push({ hash, path: `${path}${name}/` });
+        } else {
+          // blob
+          const content = readFileSync(hash, false, directory) as Buffer;
+          const nullIdx = content.indexOf(0);
+          writeFileSyncToPath(`${path}${name}`, content.slice(nullIdx + 1));
+          fs.chmodSync(`${path}${name}`, parseInt(mode, 8));
+        }
+      }
     }
 
     break;
